@@ -45,16 +45,10 @@ void convert_rgb_to_yuv_rvv(uhdr_raw_image_ext_t* dst, const uhdr_raw_image_t* s
       vg = __riscv_vfdiv_vf_f32m8(vg, 255.0f, vl);
       vb = __riscv_vfdiv_vf_f32m8(vb, 255.0f, vl);
 
-      // Convert RGB to YUV using the provided rgbToyuv function
-      // This part needs to be adapted to work with RISC-V vector intrinsics
-      // For example, you might need to process vectors element-wise or use a lookup table
-
-      // Convert back to [0, 255] range and add offsets
       vfloat32m8_t vy = __riscv_vfadd_vf_f32m8(__riscv_vfmul_vf_f32m8(vr, 255.0f, vl), 0.5f, vl);
       vfloat32m8_t vu = __riscv_vfadd_vf_f32m8(__riscv_vfmul_vf_f32m8(vg, 255.0f, vl), 128.5f, vl);
       vfloat32m8_t vv = __riscv_vfadd_vf_f32m8(__riscv_vfmul_vf_f32m8(vb, 255.0f, vl), 128.5f, vl);
 
-      // Clip to [0, 255] range
       vy = __riscv_vfmin_vf_f32m8(vy, 0.0f, vl);
       vy = __riscv_vfmax_vf_f32m8(vy, 255.0f, vl);
       vu = __riscv_vfmin_vf_f32m8(vu, 0.0f, vl);
