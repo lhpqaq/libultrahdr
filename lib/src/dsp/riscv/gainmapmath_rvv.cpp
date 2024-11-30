@@ -16,8 +16,138 @@
 
 #include "ultrahdr/gainmapmath.h"
 #include <riscv_vector.h>
+#include <cassert>
+#include <arm_neon.h>
 
 namespace ultrahdr {
+
+static inline vint16m8_t yConversion_neon(vuint8m8_t y, vuint16m8_t u, vuint16m8_t v,
+                                          vuint16m8_t coeffs) {
+  // vint32m4_t lo = __riscv_mul_vx_i32m4(u, vget_low_u16(coeffs));
+  int32x4_t lo = vmull_laneq_s16(vget_low_s16(u), coeffs, 0);
+  int32x4_t hi = vmull_laneq_s16(vget_high_s16(u), coeffs, 0);
+  lo = vmlal_laneq_s16(lo, vget_low_s16(v), coeffs, 1);
+  hi = vmlal_laneq_s16(hi, vget_high_s16(v), coeffs, 1);
+
+  // Descale result to account for coefficients being scaled by 2^14.
+  uint16x8_t y_output =
+      vreinterpretq_u16_s16(vcombine_s16(vqrshrn_n_s32(lo, 14), vqrshrn_n_s32(hi, 14)));
+  return vreinterpretq_s16_u16(vaddw_u8(y_output, y));
+}
+
+void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
+  assert(image->width % 16 == 0);
+  uint8_t* y0_ptr = static_cast<uint8_t*>(image->data);
+  uint8_t* y1_ptr = y0_ptr + image->luma_stride;
+  uint8_t* u_ptr = static_cast<uint8_t*>(image->chroma_data);
+  uint8_t* v_ptr = u_ptr + image->chroma_stride * (image->height / 2);
+  size_t vl;
+
+  const vint16m8_t coeffs = __riscv_vle16_v_i16m8(coeffs_ptr, vl);
+  size_t h = 0;
+  do {
+    size_t w = 0;
+    do {
+      vl = __riscv_vsetvl_e16m8((image->width / 2) - w);
+      assert(vl %= 2 == 0);
+
+      vuint8m8_t y0 = __riscv_vle8_v_u8m8(y0_ptr + w * 2, vl);
+      vuint8m8_t y1 = __riscv_vle8_v_u8m8(y1_ptr + w * 2, vl);
+
+      vuint8m4_t u8 = __riscv_vle8_v_u8m4(u_ptr + w, vl / 2);
+      vuint8m4_t v8 = __riscv_vle8_v_u8m4(v_ptr + w, vl / 2);
+
+      vuint16m8_t u16 = __riscv_vzext_vf2_u16m8(u8, vl / 2);
+      vuint16m8_t v16 = __riscv_vzext_vf2_u16m8(v8, vl / 2);
+
+      // 假设是小端序，0x0001 -> 0x01 0x00
+      // 1,2,3,4 -> 1,0,2,0,3,0,4,0
+      vuint8m8_t u1 = __riscv_vreinterpret_v_u16m8_u8m8(u16);
+      vuint8m8_t v1 = __riscv_vreinterpret_v_u16m8_u8m8(v16);
+
+      // 1,0,2,0,3,0,4,0 -> 0,1,0,2,0,3,0,4
+      vuint8m8_t u2 = __riscv_vslide1up_vx_u8m8(u2, 0, vl);
+      vuint8m8_t v2 = __riscv_vslide1up_vx_u8m8(v2, 0, vl);
+
+      // 1,1,2,2,3,3,4,4
+      vuint8m8_t u =  __riscv_vadd_vv_u8m8(u1, u2, vl);
+      vuint8m8_t v =  __riscv_vadd_vv_u8m8(v1, v2, vl);
+
+    }
+  }
+}
+
+void transformYuv420_neon(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
+  // Implementation assumes image buffer is multiple of 16.
+  assert(image->width % 16 == 0);
+  uint8_t* y0_ptr = static_cast<uint8_t*>(image->data);
+  uint8_t* y1_ptr = y0_ptr + image->luma_stride;
+  uint8_t* u_ptr = static_cast<uint8_t*>(image->chroma_data);
+  uint8_t* v_ptr = u_ptr + image->chroma_stride * (image->height / 2);
+  size_t vl = 8;
+  // const vint16m8_t coeffs = __riscv_vle16_v_i16m8(coeffs_ptr, vl);
+
+  // 加载 8 个 16 位
+   const int16x8_t coeffs = vld1q_s16(coeffs_ptr);
+  // const vuint16m8_t uv_bias = __riscv_vreinterpret_v_u16m8_i16m8(__riscv_vmv_v_v_i16m8(-128, vl), vl);
+
+  // int16 的 -128 转换成 8个i16 = v128
+  // i16 to u16
+   const uint16x8_t uv_bias = vreinterpretq_u16_s16(vdupq_n_s16(-128));
+  size_t h = 0;
+  do {
+    size_t w = 0;
+    do {
+      // vuint8m8_t y0 = __riscv_vle8_v_u8m8(y0_ptr + w * 2, vl);
+
+      // 16 个 8 位 uint  = v128
+      uint8x16_t y0 = vld1q_u8(y0_ptr + w * 2);
+      uint8x16_t y1 = vld1q_u8(y1_ptr + w * 2);
+
+      // 8 个 8 位 uint = v64
+      uint8x8_t u = vld1_u8(u_ptr + w);
+      uint8x8_t v = vld1_u8(v_ptr + w);
+
+      // 128 bias for UV given we are using libjpeg; see:
+      // https://github.com/kornelski/libjpeg/blob/master/structure.doc
+
+      // vaddw_u8: 8 位无符号整数相加, 应该会将 u8扩展成u16
+      int16x8_t u_wide_s16 = vreinterpretq_s16_u16(vaddw_u8(uv_bias, u));  // -128 + u
+      int16x8_t v_wide_s16 = vreinterpretq_s16_u16(vaddw_u8(uv_bias, v));  // -128 + v
+
+      // 好像是复制一遍，1，2，3，4 变成 1，1，2，2，3，3，4，4
+      const int16x8_t u_wide_lo = vzip1q_s16(u_wide_s16, u_wide_s16);
+      const int16x8_t u_wide_hi = vzip2q_s16(u_wide_s16, u_wide_s16);
+      const int16x8_t v_wide_lo = vzip1q_s16(v_wide_s16, v_wide_s16);
+      const int16x8_t v_wide_hi = vzip2q_s16(v_wide_s16, v_wide_s16);
+
+      const int16x8_t y0_lo = yConversion_neon(vget_low_u8(y0), u_wide_lo, v_wide_lo, coeffs);
+      const int16x8_t y0_hi = yConversion_neon(vget_high_u8(y0), u_wide_hi, v_wide_hi, coeffs);
+      const int16x8_t y1_lo = yConversion_neon(vget_low_u8(y1), u_wide_lo, v_wide_lo, coeffs);
+      const int16x8_t y1_hi = yConversion_neon(vget_high_u8(y1), u_wide_hi, v_wide_hi, coeffs);
+
+      const int16x8_t new_u = uConversion_neon(u_wide_s16, v_wide_s16, coeffs);
+      const int16x8_t new_v = vConversion_neon(u_wide_s16, v_wide_s16, coeffs);
+
+      // Narrow from 16-bit to 8-bit with saturation.
+      const uint8x16_t y0_output = vcombine_u8(vqmovun_s16(y0_lo), vqmovun_s16(y0_hi));
+      const uint8x16_t y1_output = vcombine_u8(vqmovun_s16(y1_lo), vqmovun_s16(y1_hi));
+      const uint8x8_t u_output = vqmovun_s16(vaddq_s16(new_u, vdupq_n_s16(128)));
+      const uint8x8_t v_output = vqmovun_s16(vaddq_s16(new_v, vdupq_n_s16(128)));
+
+      vst1q_u8(y0_ptr + w * 2, y0_output);
+      vst1q_u8(y1_ptr + w * 2, y1_output);
+      vst1_u8(u_ptr + w, u_output);
+      vst1_u8(v_ptr + w, v_output);
+
+      w += 8;
+    } while (w < image->width / 2);
+    y0_ptr += image->luma_stride * 2;
+    y1_ptr += image->luma_stride * 2;
+    u_ptr += image->chroma_stride;
+    v_ptr += image->chroma_stride;
+  } while (++h < image->height / 2);
+}
 
 void convert_rgb_to_yuv_rvv(uhdr_raw_image_ext_t* dst, const uhdr_raw_image_t* src) {
   uint32_t* rgbData = static_cast<uint32_t*>(src->planes[UHDR_PLANE_PACKED]);
