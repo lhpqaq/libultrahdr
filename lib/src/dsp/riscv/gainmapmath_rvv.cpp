@@ -35,6 +35,24 @@ static inline vint16m8_t yConversion_neon(vuint8m8_t y, vuint16m8_t u, vuint16m8
   return vreinterpretq_s16_u16(vaddw_u8(y_output, y));
 }
 
+static inline vint16m8_t yConversion_rvv(vuint8m8_t y, vint16m8_t u, vint16m8_t v,
+                                          int16_t* coeffs, size_t vl) {
+  vint32m8_t u_lo = __riscv_vwmul_vv_i32m8(__riscv_vget_v_i16m8_i16m4(u, 0), coeffs[0], vl / 2);
+  vint32m8_t u_hi = __riscv_vwmul_vv_i32m8(__riscv_vget_v_i16m8_i16m4(u, vl / 2), coeffs[0], vl / 2);
+
+  vint32m8_t v_lo = __riscv_vwmul_vv_i32m8(__riscv_vget_v_i16m8_i16m4(v, 0), coeffs[1], vl / 2);
+  vint32m8_t v_hi = __riscv_vwmul_vv_i32m8(__riscv_vget_v_i16m8_i16m4(v, vl / 2), coeffs[1], vl / 2);
+
+  vint32m8_t lo = __riscv_vadd_vv_i32m8(u_lo, v_lo, vl / 2);
+  vint32m8_t hi = __riscv_vadd_vv_i32m8(u_hi, v_hi, vl / 2);
+
+
+  // Descale result to account for coefficients being scaled by 2^14.
+  uint16x8_t y_output =
+      vreinterpretq_u16_s16(vcombine_s16(vqrshrn_n_s32(lo, 14), vqrshrn_n_s32(hi, 14)));
+  return vreinterpretq_s16_u16(vaddw_u8(y_output, y));
+}
+
 void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
   assert(image->width % 16 == 0);
   uint8_t* y0_ptr = static_cast<uint8_t*>(image->data);
@@ -43,12 +61,14 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
   uint8_t* v_ptr = u_ptr + image->chroma_stride * (image->height / 2);
   size_t vl;
 
-  const vint16m8_t coeffs = __riscv_vle16_v_i16m8(coeffs_ptr, vl);
+  // const vint16m8_t coeffs = __riscv_vle16_v_i16m8(coeffs_ptr, vl);
+  // const 
   size_t h = 0;
   do {
     size_t w = 0;
     do {
-      vl = __riscv_vsetvl_e16m8((image->width / 2) - w);
+      // vl = __riscv_vsetvl_e16m8((image->width / 2) - w);
+      vl = __riscv_vsetvl_e8m8((image->width / 2) - w);
       assert(vl %= 2 == 0);
 
       vuint8m8_t y0 = __riscv_vle8_v_u8m8(y0_ptr + w * 2, vl);
@@ -57,21 +77,31 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       vuint8m4_t u8 = __riscv_vle8_v_u8m4(u_ptr + w, vl / 2);
       vuint8m4_t v8 = __riscv_vle8_v_u8m4(v_ptr + w, vl / 2);
 
-      vuint16m8_t u16 = __riscv_vzext_vf2_u16m8(u8, vl / 2);
-      vuint16m8_t v16 = __riscv_vzext_vf2_u16m8(v8, vl / 2);
+      // -128 = 11111000 = 248
+      vint16m8_t u16_wide =  __riscv_vwsub_vx_i16m8(u, -128, vl / 2);
+      vint16m8_t v16_wide =  __riscv_vwsub_vx_i16m8(v, -128, vl / 2);
+
+      // vuint16m8_t u16 = __riscv_vzext_vf2_u16m8(u8, vl / 2);
+      // vuint16m8_t v16 = __riscv_vzext_vf2_u16m8(v8, vl / 2);
 
       // 假设是小端序，0x0001 -> 0x01 0x00
-      // 1,2,3,4 -> 1,0,2,0,3,0,4,0
-      vuint8m8_t u1 = __riscv_vreinterpret_v_u16m8_u8m8(u16);
-      vuint8m8_t v1 = __riscv_vreinterpret_v_u16m8_u8m8(v16);
+      // 1,2,3,4 -> 1,-1,2,-1,3,-1,4,-1
+      vint8m8_t u1 = __riscv_vreinterpret_v_i16m8_i8m8(u16_wide);
+      vint8m8_t v1 = __riscv_vreinterpret_v_i16m8_i8m8(v16_wide);
 
-      // 1,0,2,0,3,0,4,0 -> 0,1,0,2,0,3,0,4
-      vuint8m8_t u2 = __riscv_vslide1up_vx_u8m8(u2, 0, vl);
-      vuint8m8_t v2 = __riscv_vslide1up_vx_u8m8(v2, 0, vl);
+      // 1,-1,2,-1,3,-1,4,-1 -> -1,1,-1,2,-1,3,-1,4
+      vint8m8_t u2 = __riscv_vslide1up_vx_i8m8(u2, -1, vl);
+      vint8m8_t v2 = __riscv_vslide1up_vx_i8m8(v2, -1, vl);
 
       // 1,1,2,2,3,3,4,4
-      vuint8m8_t u =  __riscv_vadd_vv_u8m8(u1, u2, vl);
-      vuint8m8_t v =  __riscv_vadd_vv_u8m8(v1, v2, vl);
+      vint8m8_t u =  __riscv_vadd_vx_i8m8(__riscv_vadd_vv_i8m8(u1, u2, vl), 1, vl);
+      vint8m8_t v =  __riscv_vadd_vx_i8m8(__riscv_vadd_vv_i8m8(v1, v2, vl), 1, vl);
+
+      // __riscv_vget_v_i8m8_i8m4 = vint8m4_t
+      vint16m8_t u_lo = __riscv_vsext_vf2_i16m8(__riscv_vget_v_i8m8_i8m4(u, 0), vl / 2);
+      vint16m8_t u_hi = __riscv_vsext_vf2_i16m8(__riscv_vget_v_i8m8_i8m4(u, vl / 2), vl / 2);
+
+      
 
     }
   }
