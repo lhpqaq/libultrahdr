@@ -86,6 +86,12 @@ static inline vint16m8_t vcombine_s16(vint16m4_t a, vint16m4_t b, size_t vl) {
   return __riscv_vslideup_vx_i16m8(a_wide, b_wide, vl / 2, vl);
 }
 
+static inline vuint8m8_t vcombine_u8(vuint8m4_t a, vuint8m4_t b, size_t vl) {
+  vuint8m8_t a_wide = __riscv_vlmul_ext_v_u8m4_u8m8(a);
+  vuint8m8_t b_wide = __riscv_vlmul_ext_v_u8m4_u8m8(b);
+  return __riscv_vslideup_vx_u8m8(a_wide, b_wide, vl / 2, vl);
+}
+
 static inline vint16m8_t yConversion_rvv(vuint8m4_t y, vint16m8_t u, vint16m8_t v,
                                           const int16_t* coeffs, size_t vl) {
   vint32m8_t u_lo = __riscv_vwmul_vx_i32m8(vget_low_s16(u), coeffs[0], vl / 2);
@@ -101,16 +107,50 @@ static inline vint16m8_t yConversion_rvv(vuint8m4_t y, vint16m8_t u, vint16m8_t 
   vint16m4_t hi_shr = vqrshrn_n_s32(hi, 14, vl / 2);
 
   vint16m8_t y_output = vcombine_s16(lo_shr, hi_shr, vl);
-  
-  // __riscv_vslideup_vx_i16m8(vqrshrn_n_s32(lo, 14, vl / 2), vqrshrn_n_s32(hi, 14, vl / 2), vl / 2, vl);
-
-  // Descale result to account for coefficients being scaled by 2^14.
-  // uint16x8_t y_output =
-  //     vreinterpretq_u16_s16(vcombine_s16(vqrshrn_n_s32(lo, 14), vqrshrn_n_s32(hi, 14)));
-  // return vreinterpretq_s16_u16(vaddw_u8(y_output, y));
   vuint16m8_t y_u16 = __riscv_vreinterpret_v_i16m8_u16m8(y_output);
   vuint16m8_t y_ret = __riscv_vwaddu_wv_u16m8(y_u16, y, vl);
   return __riscv_vreinterpret_v_u16m8_i16m8(y_ret);
+}
+
+static inline vint16m8_t uConversion_rvv(vint16m8_t u, vint16m8_t v,
+                                          const int16_t* coeffs, size_t vl) {
+  vint32m8_t u_lo = __riscv_vwmul_vx_i32m8(vget_low_s16(u), coeffs[2], vl / 2);
+  vint32m8_t u_hi = __riscv_vwmul_vx_i32m8(vget_high_s16(u, vl), coeffs[2], vl / 2);
+
+  vint32m8_t v_lo = __riscv_vwmul_vx_i32m8(vget_low_s16(v), coeffs[3], vl / 2);
+  vint32m8_t v_hi = __riscv_vwmul_vx_i32m8(vget_high_s16(v, vl), coeffs[3], vl / 2);
+
+  vint32m8_t lo = __riscv_vadd_vv_i32m8(u_lo, v_lo, vl / 2);
+  vint32m8_t hi = __riscv_vadd_vv_i32m8(u_hi, v_hi, vl / 2);
+
+  vint16m4_t lo_shr = vqrshrn_n_s32(lo, 14, vl / 2); 
+  vint16m4_t hi_shr = vqrshrn_n_s32(hi, 14, vl / 2);
+
+  vint16m8_t u_output = vcombine_s16(lo_shr, hi_shr, vl);
+  return u_output;
+}
+
+static inline vint16m8_t vConversion_rvv(vint16m8_t u, vint16m8_t v,
+                                          const int16_t* coeffs, size_t vl) {
+  vint32m8_t u_lo = __riscv_vwmul_vx_i32m8(vget_low_s16(u), coeffs[4], vl / 2);
+  vint32m8_t u_hi = __riscv_vwmul_vx_i32m8(vget_high_s16(u, vl), coeffs[4], vl / 2);
+
+  vint32m8_t v_lo = __riscv_vwmul_vx_i32m8(vget_low_s16(v), coeffs[5], vl / 2);
+  vint32m8_t v_hi = __riscv_vwmul_vx_i32m8(vget_high_s16(v, vl), coeffs[5], vl / 2);
+
+  vint32m8_t lo = __riscv_vadd_vv_i32m8(u_lo, v_lo, vl / 2);
+  vint32m8_t hi = __riscv_vadd_vv_i32m8(u_hi, v_hi, vl / 2);
+
+  vint16m4_t lo_shr = vqrshrn_n_s32(lo, 14, vl / 2); 
+  vint16m4_t hi_shr = vqrshrn_n_s32(hi, 14, vl / 2);
+
+  vint16m8_t v_output = vcombine_s16(lo_shr, hi_shr, vl);
+  return v_output;
+}
+
+static inline vuint8m4_t vqmovun_s16(vint16m8_t a, size_t vl) {
+  vuint16m8_t a_non_neg = __riscv_vreinterpret_v_i16m8_u16m8(__riscv_vmax_vx_i16m8(a, 0, vl));
+  return __riscv_vnclipu_wx_u8m4(a_non_neg, 0, vl);
 }
 
 void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
@@ -146,11 +186,6 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       vuint16m8_t uu_wide_hi = zip_self(vget_high_u16(u16_wide, vl / 2), vl);
       vuint16m8_t uv_wide_lo = zip_self(__riscv_vget_v_u16m8_u16m4(v16_wide, 0), vl);
       vuint16m8_t uv_wide_hi = zip_self(vget_high_u16(v16_wide, vl / 2), vl);
-      // vuint16m4_t u16_wide_lo = __riscv_vget_v_u16m8_u16m4(u16_wide, 0);
-      // vuint32m8_t u16_wide_lo_ext = __riscv_vzext_vf2_u32m8(u16_wide_lo, vl / 4);
-      // vuint16m8_t u16_wide_lo_ext_u16 = __riscv_vreinterpret_v_u32m8_u16m8(u16_wide_lo_ext);
-      // vuint16m8_t u16_wide_lo_ext_u16_slide = __riscv_vslide1up_vx_u16m8(u16_wide_lo_ext_u16, 0, vl / 2);
-      // vuint16m8_t u_wide_lo = __riscv_vadd_vv_u16m8(u16_wide_lo_ext_u16, u16_wide_lo_ext_u16_slide, vl / 2);
       
       vint16m8_t u_wide_lo = __riscv_vreinterpret_v_u16m8_i16m8(uu_wide_lo);
       vint16m8_t v_wide_lo = __riscv_vreinterpret_v_u16m8_i16m8(uv_wide_lo);
@@ -161,6 +196,22 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       vint16m8_t y1_lo = yConversion_rvv(vget_low_u8(y1), u_wide_lo, v_wide_lo, coeffs_ptr, vl / 2);
       vint16m8_t y0_hi = yConversion_rvv(vget_high_u8(y0, vl / 2), u_wide_hi, v_wide_hi, coeffs_ptr, vl / 2);
       vint16m8_t y1_hi = yConversion_rvv(vget_high_u8(y1, vl / 2), u_wide_hi, v_wide_hi, coeffs_ptr, vl / 2);
+      
+      vint16m8_t u_wide_s16 = __riscv_vreinterpret_v_u16m8_i16m8(u16_wide);
+      vint16m8_t v_wide_s16 = __riscv_vreinterpret_v_u16m8_i16m8(v16_wide);
+      vint16m8_t new_u = uConversion_rvv(u_wide_s16, v_wide_s16, coeffs_ptr, vl / 2);
+      vint16m8_t new_v = vConversion_rvv(u_wide_s16, v_wide_s16, coeffs_ptr, vl / 2);
+
+      vuint8m8_t y0_output = vcombine_u8(vqmovun_s16(y0_lo, vl / 2), vqmovun_s16(y0_hi, vl / 2), vl);
+      vuint8m8_t y1_output = vcombine_u8(vqmovun_s16(y1_lo, vl / 2), vqmovun_s16(y1_hi, vl / 2), vl);
+      vuint8m4_t u_output = vqmovun_s16(__riscv_vadd_vx_i16m8(new_u, 128, vl / 2), vl / 2);
+      vuint8m4_t v_output = vqmovun_s16(__riscv_vadd_vx_i16m8(new_v, 128, vl / 2), vl / 2);
+
+      __riscv_vse8_v_u8m8(y0_ptr + w * 2, y0_output, vl);
+      __riscv_vse8_v_u8m8(y1_ptr + w * 2, y1_output, vl);
+      __riscv_vse8_v_u8m4(u_ptr + w, u_output, vl / 2);
+      __riscv_vse8_v_u8m4(v_ptr + w, v_output, vl / 2);
+
       // here
       // vuint16m8_t u16 = __riscv_vzext_vf2_u16m8(u8, vl / 2);
       // vuint16m8_t v16 = __riscv_vzext_vf2_u16m8(v8, vl / 2);
@@ -181,7 +232,12 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       // // __riscv_vget_v_i8m8_i8m4 = vint8m4_t
       // vint16m8_t u_lo = __riscv_vsext_vf2_i16m8(__riscv_vget_v_i8m8_i8m4(u, 0), vl / 2);
       // vint16m8_t u_hi = __riscv_vsext_vf2_i16m8(__riscv_vget_v_i8m8_i8m4(u, vl / 2), vl / 2);
+      w+= vl / 2;
     } while (w < image->width / 2);
+      y0_ptr += image->luma_stride * 2;
+      y1_ptr += image->luma_stride * 2;
+      u_ptr += image->chroma_stride;
+      v_ptr += image->chroma_stride;
   } while (++h < image->height / 2);
 }
 
