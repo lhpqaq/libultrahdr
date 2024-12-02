@@ -70,10 +70,10 @@ __attribute__((aligned(16)))
 const int16_t kYuv2100To601_coeffs_rvv[8] = {1931, 1729, 16306, -976, -1378, 15999, 0, 0};
 
 static inline vuint16m8_t zip_self(vuint16m4_t a, size_t vl) {
-  vuint32m8_t a_wide = __riscv_vzext_vf2_u32m8(a, vl / 4);
+  vuint32m8_t a_wide = __riscv_vzext_vf2_u32m8(a, vl / 2);
   vuint16m8_t a_zero = __riscv_vreinterpret_v_u32m8_u16m8(a_wide);
-  vuint16m8_t a_zero_slide = __riscv_vslide1up_vx_u16m8(a_zero, 0, vl / 2);
-  vuint16m8_t a_zip = __riscv_vadd_vv_u16m8(a_zero, a_zero_slide, vl / 2);
+  vuint16m8_t a_zero_slide = __riscv_vslide1up_vx_u16m8(a_zero, 0, vl);
+  vuint16m8_t a_zip = __riscv_vadd_vv_u16m8(a_zero, a_zero_slide, vl);
   return a_zip;
 }
 
@@ -172,22 +172,20 @@ static inline vuint8m4_t vqmovun_s16(vint16m8_t a, size_t vl) {
   return __riscv_vnclipu_wx_u8m4(a_non_neg, 0, vl);
 }
 
-void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
+void transformYuv420_rvv(uhdr_raw_image_t* image, const int16_t* coeffs_ptr) {
   assert(image->width % 16 == 0);
-  uint8_t* y0_ptr = static_cast<uint8_t*>(image->data);
-  uint8_t* y1_ptr = y0_ptr + image->luma_stride;
-  uint8_t* u_ptr = static_cast<uint8_t*>(image->chroma_data);
-  uint8_t* v_ptr = u_ptr + image->chroma_stride * (image->height / 2);
+  uint8_t* y0_ptr = static_cast<uint8_t*>(image->planes[UHDR_PLANE_Y]);
+  uint8_t* y1_ptr = y0_ptr + image->stride[UHDR_PLANE_Y];
+  uint8_t* u_ptr = static_cast<uint8_t*>(image->planes[UHDR_PLANE_U]);
+  uint8_t* v_ptr = static_cast<uint8_t*>(image->planes[UHDR_PLANE_V]);
   size_t vl;
 
-  // const vint16m8_t coeffs = __riscv_vle16_v_i16m8(coeffs_ptr, vl);
-  // const
   size_t h = 0;
   do {
     size_t w = 0;
     do {
       // vl = __riscv_vsetvl_e16m8((image->width / 2) - w);
-      vl = __riscv_vsetvl_e8m8((image->width / 2) - w);
+      vl = __riscv_vsetvl_e8m8(image->w - w);
       assert((vl %= 4) == 0);
 
       vuint8m8_t y0 = __riscv_vle8_v_u8m8(y0_ptr + w * 2, vl);
@@ -199,10 +197,10 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       vuint16m8_t u16_wide = __riscv_vwaddu_vx_u16m8(u8, -128, vl / 2);
       vuint16m8_t v16_wide = __riscv_vwaddu_vx_u16m8(v8, -128, vl / 2);
 
-      vuint16m8_t uu_wide_lo = zip_self(__riscv_vget_v_u16m8_u16m4(u16_wide, 0), vl);
-      vuint16m8_t uu_wide_hi = zip_self(vget_high_u16(u16_wide, vl / 2), vl);
-      vuint16m8_t uv_wide_lo = zip_self(__riscv_vget_v_u16m8_u16m4(v16_wide, 0), vl);
-      vuint16m8_t uv_wide_hi = zip_self(vget_high_u16(v16_wide, vl / 2), vl);
+      vuint16m8_t uu_wide_lo = zip_self(__riscv_vget_v_u16m8_u16m4(u16_wide, 0), vl / 2);
+      vuint16m8_t uu_wide_hi = zip_self(vget_high_u16(u16_wide, vl / 2), vl / 2);
+      vuint16m8_t uv_wide_lo = zip_self(__riscv_vget_v_u16m8_u16m4(v16_wide, 0), vl / 2);
+      vuint16m8_t uv_wide_hi = zip_self(vget_high_u16(v16_wide, vl / 2), vl / 2);
 
       vint16m8_t u_wide_lo = __riscv_vreinterpret_v_u16m8_i16m8(uu_wide_lo);
       vint16m8_t v_wide_lo = __riscv_vreinterpret_v_u16m8_i16m8(uv_wide_lo);
@@ -234,82 +232,93 @@ void transformYuv420_rvv(jr_uncompressed_ptr image, const int16_t* coeffs_ptr) {
       __riscv_vse8_v_u8m4(v_ptr + w, v_output, vl / 2);
 
       w += vl / 2;
-    } while (w < image->width / 2);
-    y0_ptr += image->luma_stride * 2;
-    y1_ptr += image->luma_stride * 2;
-    u_ptr += image->chroma_stride;
-    v_ptr += image->chroma_stride;
-  } while (++h < image->height / 2);
+    } while (w < image->w / 2);
+    y0_ptr += image->stride[UHDR_PLANE_Y] * 2;
+    y1_ptr += image->stride[UHDR_PLANE_Y] * 2;
+    u_ptr += image->stride[UHDR_PLANE_U];
+    v_ptr += image->stride[UHDR_PLANE_V];
+  } while (++h < image->h / 2);
 }
 
-status_t convertYuv_rvv(jr_uncompressed_ptr image, ultrahdr_color_gamut src_encoding,
-                        ultrahdr_color_gamut dst_encoding) {
-  if (image == nullptr) {
-    return ERROR_JPEGR_BAD_PTR;
-  }
-  if (src_encoding == ULTRAHDR_COLORGAMUT_UNSPECIFIED ||
-      dst_encoding == ULTRAHDR_COLORGAMUT_UNSPECIFIED) {
-    return ERROR_JPEGR_INVALID_COLORGAMUT;
-  }
-
+uhdr_error_info_t convertYuv_rvv(uhdr_raw_image_t* image, uhdr_color_gamut_t src_encoding,
+                                 uhdr_color_gamut_t dst_encoding) {
+  uhdr_error_info_t status = g_no_error;
   const int16_t* coeffs = nullptr;
+
   switch (src_encoding) {
-    case ULTRAHDR_COLORGAMUT_BT709:
+    case UHDR_CG_BT_709:
       switch (dst_encoding) {
-        case ULTRAHDR_COLORGAMUT_BT709:
-          return JPEGR_NO_ERROR;
-        case ULTRAHDR_COLORGAMUT_P3:
+        case UHDR_CG_BT_709:
+          return status;
+        case UHDR_CG_DISPLAY_P3:
           coeffs = kYuv709To601_coeffs_rvv;
           break;
-        case ULTRAHDR_COLORGAMUT_BT2100:
+        case UHDR_CG_BT_2100:
           coeffs = kYuv709To2100_coeffs_rvv;
           break;
         default:
-          // Should be impossible to hit after input validation
-          return ERROR_JPEGR_INVALID_COLORGAMUT;
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "Unrecognized dest color gamut %d",
+                   dst_encoding);
+          return status;
       }
       break;
-    case ULTRAHDR_COLORGAMUT_P3:
+    case UHDR_CG_DISPLAY_P3:
       switch (dst_encoding) {
-        case ULTRAHDR_COLORGAMUT_BT709:
+        case UHDR_CG_BT_709:
           coeffs = kYuv601To709_coeffs_rvv;
           break;
-        case ULTRAHDR_COLORGAMUT_P3:
-          return JPEGR_NO_ERROR;
-        case ULTRAHDR_COLORGAMUT_BT2100:
+        case UHDR_CG_DISPLAY_P3:
+          return status;
+        case UHDR_CG_BT_2100:
           coeffs = kYuv601To2100_coeffs_rvv;
           break;
         default:
-          // Should be impossible to hit after input validation
-          return ERROR_JPEGR_INVALID_COLORGAMUT;
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "Unrecognized dest color gamut %d",
+                   dst_encoding);
+          return status;
       }
       break;
-    case ULTRAHDR_COLORGAMUT_BT2100:
+    case UHDR_CG_BT_2100:
       switch (dst_encoding) {
-        case ULTRAHDR_COLORGAMUT_BT709:
+        case UHDR_CG_BT_709:
           coeffs = kYuv2100To709_coeffs_rvv;
           break;
-        case ULTRAHDR_COLORGAMUT_P3:
+        case UHDR_CG_DISPLAY_P3:
           coeffs = kYuv2100To601_coeffs_rvv;
           break;
-        case ULTRAHDR_COLORGAMUT_BT2100:
-          return JPEGR_NO_ERROR;
+        case UHDR_CG_BT_2100:
+          return status;
         default:
-          // Should be impossible to hit after input validation
-          return ERROR_JPEGR_INVALID_COLORGAMUT;
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "Unrecognized dest color gamut %d",
+                   dst_encoding);
+          return status;
       }
       break;
     default:
-      // Should be impossible to hit after input validation
-      return ERROR_JPEGR_INVALID_COLORGAMUT;
+      status.error_code = UHDR_CODEC_INVALID_PARAM;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail, "Unrecognized src color gamut %d",
+               src_encoding);
+      return status;
   }
 
-  if (coeffs == nullptr) {
-    // Should be impossible to hit after input validation
-    return ERROR_JPEGR_INVALID_COLORGAMUT;
+  if (image->fmt == UHDR_IMG_FMT_12bppYCbCr420) {
+    transformYuv420_rvv(image, coeffs);
+  } else {
+    status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail,
+             "No implementation available for performing gamut conversion for color format %d",
+             image->fmt);
+    return status;
   }
 
-  transformYuv420_rvv(image, coeffs);
-  return JPEGR_NO_ERROR;
+  return status;
 }
 }  // namespace ultrahdr
