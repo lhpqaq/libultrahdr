@@ -15,6 +15,7 @@
  */
 
 #include "ultrahdr/gainmapmath.h"
+#include "ultrahdr/dsp/riscv/rvv_helper.h"
 #include <riscv_vector.h>
 #include <cassert>
 

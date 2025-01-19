@@ -30,6 +30,7 @@
 #include "ultrahdr/editorhelper.h"
 #include "ultrahdr/gainmapmetadata.h"
 #include "ultrahdr/ultrahdrcommon.h"
+#include "ultrahdr/dsp/riscv/rvv_helper.h"
 #include "ultrahdr/jpegr.h"
 #include "ultrahdr/icc.h"
 #include "ultrahdr/multipictureformat.h"
@@ -274,7 +275,11 @@ uhdr_error_info_t JpegR::encodeJPEGR(uhdr_raw_image_t* hdr_intent, uhdr_raw_imag
 #if (defined(UHDR_ENABLE_INTRINSICS) && (defined(__ARM_NEON__) || defined(__ARM_NEON)))
   UHDR_ERR_CHECK(convertYuv_neon(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
 #elif (defined(UHDR_ENABLE_INTRINSICS) && defined(__riscv_v_intrinsic))
-  UHDR_ERR_CHECK(convertYuv_rvv(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
+  if (check_riscv_vector_support()) {
+    UHDR_ERR_CHECK(convertYuv_rvv(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
+  } else {
+    UHDR_ERR_CHECK(convertYuv(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
+  }
 #else
   UHDR_ERR_CHECK(convertYuv(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
 #endif

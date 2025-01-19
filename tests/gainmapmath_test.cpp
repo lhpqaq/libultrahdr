@@ -983,7 +983,10 @@ TEST_F(GainMapMathTest, TransformYuv420SIMD) {
 #if (defined(__ARM_NEON__) || defined(__ARM_NEON))
     transformYuv420_neon(&output, neon_coeffs_ptr);
 #elif defined(__riscv_v_intrinsic)
-    transformYuv420_rvv(&output, neon_coeffs_ptr);
+    if (check_riscv_vector_support())
+      transformYuv420_rvv(&output, neon_coeffs_ptr);
+    else
+      return;
 #else
     return;
 #endif
